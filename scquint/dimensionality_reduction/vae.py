@@ -665,7 +665,7 @@ class UnsupervisedTrainer(UnsupervisedTrainer_scVI):
     ):
         super().__init__(model, gene_dataset, **kwargs)
         self.n_epochs_kl_warmup = n_epochs_kl_warmup
-        if type(self) is UnsupervisedTrainer:
+        if isinstance(self, UnsupervisedTrainer) and type(self).__name__ == 'UnsupervisedTrainer':
             (
                 self.train_set,
                 self.test_set,

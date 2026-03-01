@@ -27,6 +27,7 @@ setup(
     author_email='gbenegas@berkeley.edu',
     license='MIT',
     packages=['scquint', 'scquint.dimensionality_reduction'],
+    python_requires='>=3.12',
     zip_safe=False,
     install_requires=install_requires,
     extras_require = {
