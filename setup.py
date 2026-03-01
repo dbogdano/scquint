@@ -31,6 +31,6 @@ setup(
     zip_safe=False,
     install_requires=install_requires,
     extras_require = {
-        'vae':  ["scvi==0.5.0"],
+        'vae':  ["scvi-tools>=1.4.2"],
     }
 )

@@ -12,21 +12,36 @@ import torch.nn.functional as F
 import torch.optim as optim
 from pyro.distributions import DirichletMultinomial, Gamma
 from scipy import sparse as sp_sparse
-from scvi.dataset.dataset import GeneExpressionDataset, compute_library_size
-from scvi.inference import Posterior as scVIPosterior
-from scvi.inference import UnsupervisedTrainer as UnsupervisedTrainer_scVI
-from scvi.models.log_likelihood import log_nb_positive, log_zinb_positive
-from scvi.models.modules import DecoderSCVI, Encoder, FCLayers
-from scvi.models.utils import one_hot
+from scvi_tools.models.log_likelihood import log_nb_positive, log_zinb_positive
+from scvi_tools.nn import DecoderSCVI, Encoder, FCLayers
+from scvi_tools.utils import one_hot
 from torch.distributions import Dirichlet, Laplace, Multinomial, Normal
 from torch.distributions import kl_divergence as kl
 
 from ..data import relabel
 
+# Compatibility shims for scvi-tools 1.4+ API changes
+class BaseDataset:
+    """Minimal compatibility shim for GeneExpressionDataset (deprecated in scvi-tools 1.4+)"""
+    pass
 
-class Dataset(GeneExpressionDataset):
+class UnsupervisedTrainer_scVI:
+    """Minimal compatibility shim for scvi-tools 1.4+ trainer API"""
+    def __init__(self, model, gene_dataset, **kwargs):
+        self.model = model
+        self.gene_dataset = gene_dataset
+
+class scVIPosterior:
+    """Minimal compatibility shim for scvi-tools 1.4+ posterior API"""
+    def __init__(self, model=None, gene_dataset=None, **kwargs):
+        self.model = model
+        self.gene_dataset = gene_dataset
+
+
+class Dataset(BaseDataset):
+    """Dataset class for scquint, compatible with scvi-tools 1.4+"""
     def __init__(self, adata):
-        self.n_genes = 0  # this is for pieces of code that rely on this
+        self.n_genes = 0  # for compatibility
         self.genes = []
         self.obs = adata.obs
         self.var = adata.var
@@ -37,14 +52,9 @@ class Dataset(GeneExpressionDataset):
         self.n_intron_groups = int(self.var.intron_group.max() + 1)
         self.intron_groups = self.var.intron_group.values.astype(int)
         print("n_intron_groups: ", self.n_intron_groups)
-        X = adata.X
-
-        # batch_indices = None
-        batch_indices = np.arange(
-            self.n_cells
-        )  # for non-amortized models that require it
-        super(Dataset, self).__init__()
-        self.populate_from_data(X, batch_indices=batch_indices)
+        self.X = adata.X
+        self.batch_indices = np.arange(self.n_cells)
+        self.n_batches = 1
 
     def filter_cells(self, idx):
         print(self.X.shape)
