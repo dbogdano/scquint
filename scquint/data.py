@@ -30,7 +30,7 @@ def load_adata_from_starsolo(
             "max_overhang",
         ],
     )
-    var.strand.replace({0: "NA", 1: "+", 2: "-"}, inplace=True)
+    var["strand"] = var["strand"].replace({0: "NA", 1: "+", 2: "-"})
     var.index = var.chromosome + ":" + var.start.astype(str) + "-" + var.end.astype(str)
 
     adata.obs = obs
