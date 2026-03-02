@@ -575,31 +575,73 @@ def run_differential_splicing_for_each_group(
     groupby,
     groups=None,
     subset_to_groups=False,
+    n_jobs_groups=1,
     **kwargs,
 ):
+    """
+    Run differential splicing analysis for each group.
+    
+    Parameters
+    ----------
+    adata_spl : AnnData
+        Annotated data matrix containing splicing information
+    groupby : str
+        Column name in adata_spl.obs to group by
+    groups : list, optional
+        Specific groups to analyze. If None, all unique groups are used.
+    subset_to_groups : bool, default False
+        Whether to subset the data to only the specified groups
+    n_jobs_groups : int, default 1
+        Number of parallel jobs for processing groups. Set to -1 to use all cores.
+        Note: If this is > 1, consider setting the 'n_jobs' parameter in kwargs to 1
+        to avoid nested parallelization, which can be inefficient.
+    **kwargs
+        Additional arguments passed to run_differential_splicing
+    
+    Returns
+    -------
+    all_intron_groups : pd.DataFrame
+        Differential splicing results at the intron group level
+    all_introns : pd.DataFrame
+        Differential splicing results at the individual intron level
+    """
     if subset_to_groups:
         assert(groups is not None)
         adata_spl = adata_spl[adata_spl.obs[groupby].isin(groups)]
     
-    all_intron_groups = []
-    all_introns = []
-
     if groups is None:
         groups = adata_spl.obs[groupby].unique()
-
-    for g in groups:
+    
+    # Pre-compute all group indices to avoid repeated np.where calls
+    group_obs = adata_spl.obs[groupby].values
+    group_indices = {g: np.where(group_obs == g)[0] for g in groups}
+    
+    def process_group(g):
+        """Process a single group for differential splicing."""
         print(g)
-        cell_idx_a = np.where(adata_spl.obs[groupby]==g)[0]
-        cell_idx_b = np.where(adata_spl.obs[groupby]!=g)[0]
+        cell_idx_a = group_indices[g]
+        cell_idx_b = np.where(group_obs != g)[0]
+        
         intron_groups, introns = run_differential_splicing(
             adata_spl, cell_idx_a, cell_idx_b, **kwargs, 
         )
+        
         intron_groups["test_group"] = g
         introns["test_group"] = g
         intron_groups["name"] = intron_groups.index
         introns["name"] = introns.index
-        all_intron_groups.append(intron_groups)
-        all_introns.append(introns)
+        
+        return intron_groups, introns
+    
+    # Parallelize across groups if requested
+    if n_jobs_groups is not None and n_jobs_groups != 1:
+        results = Parallel(n_jobs=n_jobs_groups)(
+            delayed(process_group)(g) for g in groups
+        )
+        all_intron_groups, all_introns = zip(*results)
+    else:
+        results = [process_group(g) for g in groups]
+        all_intron_groups, all_introns = zip(*results)
 
     all_intron_groups = pd.concat(all_intron_groups, ignore_index=True)
     all_introns = pd.concat(all_introns, ignore_index=True)
