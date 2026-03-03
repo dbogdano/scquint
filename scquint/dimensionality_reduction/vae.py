@@ -169,6 +169,24 @@ class scVIPosterior:
     def __init__(self, model=None, gene_dataset=None, **kwargs):
         self.model = model
         self.gene_dataset = gene_dataset
+        self.use_cuda = kwargs.get('use_cuda', False)
+        data_loader_kwargs = kwargs.get('data_loader_kwargs', {})
+        batch_size = data_loader_kwargs.get('batch_size', 128)
+        
+        # Create data loader for the entire dataset
+        indices = np.arange(gene_dataset.n_cells)
+        self.data_loader = DataLoader(
+            gene_dataset, 
+            indices, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            use_cuda=self.use_cuda
+        )
+        self.indices = indices
+
+    def __iter__(self):
+        """Make posterior iterable over batches."""
+        return iter(self.data_loader)
 
 
 class Dataset(BaseDataset):
