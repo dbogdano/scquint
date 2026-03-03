@@ -852,6 +852,27 @@ class Posterior(scVIPosterior):
         return reconstruction_error
 
     @torch.no_grad()
+    def get_latent(self, sample=True):
+        """Get latent representation for all cells.
+        
+        Parameters
+        ----------
+        sample : bool
+            Whether to sample from the posterior (True) or return mean (False)
+            
+        Returns
+        -------
+        list
+            List containing latent representation array of shape (n_cells, n_latent)
+        """
+        Z = []
+        for tensors in self:
+            sample_batch = tensors[0]
+            z = self.model.sample_from_posterior_z(sample_batch, give_mean=not sample)
+            Z.append(z.cpu().numpy())
+        return [np.concatenate(Z, axis=0)]
+
+    @torch.no_grad()
     def get_z_m_v(self):
         M = []
         V = []
