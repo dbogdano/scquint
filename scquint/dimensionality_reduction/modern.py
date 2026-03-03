@@ -114,6 +114,7 @@ class SCQuintVAE:
         early_stopping_patience: int = 10,
         lr_patience: int = 5,
         lr_factor: float = 0.5,
+        early_stopping_metric: str = "reconstruction_error",
     ) -> None:
         """Train VAE with KL annealing, train/test split, and early stopping.
         
@@ -141,6 +142,8 @@ class SCQuintVAE:
             Patience for learning rate reduction (default: 5)
         lr_factor : float
             Factor to reduce learning rate by (default: 0.5)
+        early_stopping_metric : str
+            Metric to use for early stopping: "reconstruction_error" or "elbo" (default: "reconstruction_error")
         """
         # Split into train/test
         n_cells = self.dataset.n_cells
@@ -155,10 +158,10 @@ class SCQuintVAE:
         self.module.train()
         optimizer = torch.optim.Adam(self.module.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=lr_factor, patience=lr_patience, verbose=verbose
+            optimizer, mode="min", factor=lr_factor, patience=lr_patience
         )
 
-        best_test_loss = float("inf")
+        best_metric = float("inf")
         patience_counter = 0
 
         for epoch in range(max_epochs):
@@ -194,8 +197,8 @@ class SCQuintVAE:
 
                 bs = x.shape[0]
                 train_loss += float(loss.detach().cpu().item()) * bs
-                train_reconst += float(reconst_loss.mean().detach().cpu().item()) * bs
-                train_kl += float(kl_divergence.mean().detach().cpu().item()) * bs
+                train_reconst += float(reconst_loss.sum().detach().cpu().item())
+                train_kl += float(kl_divergence.sum().detach().cpu().item())
                 n_train_seen += bs
 
             # Test phase
@@ -219,11 +222,11 @@ class SCQuintVAE:
 
                     bs = x.shape[0]
                     test_loss += float(loss.detach().cpu().item()) * bs
-                    test_reconst += float(reconst_loss.mean().detach().cpu().item()) * bs
-                    test_kl += float(kl_divergence.mean().detach().cpu().item()) * bs
+                    test_reconst += float(reconst_loss.sum().detach().cpu().item())
+                    test_kl += float(kl_divergence.sum().detach().cpu().item())
                     n_test_seen += bs
 
-            # Average losses
+            # Average losses (reconstruction/kl use sum, not mean)
             train_loss_avg = train_loss / max(n_train_seen, 1)
             test_loss_avg = test_loss / max(n_test_seen, 1)
             train_reconst_avg = train_reconst / max(n_train_seen, 1)
@@ -231,12 +234,17 @@ class SCQuintVAE:
             train_kl_avg = train_kl / max(n_train_seen, 1)
             test_kl_avg = test_kl / max(n_test_seen, 1)
 
-            # Learning rate scheduling
+            # Learning rate scheduling (on test ELBO)
             scheduler.step(test_loss_avg)
 
-            # Early stopping based on test loss
-            if test_loss_avg < best_test_loss:
-                best_test_loss = test_loss_avg
+            # Early stopping based on chosen metric
+            if early_stopping_metric == "reconstruction_error":
+                monitor_metric = test_reconst_avg
+            else:  # "elbo"
+                monitor_metric = test_loss_avg
+
+            if monitor_metric < best_metric:
+                best_metric = monitor_metric
                 patience_counter = 0
             else:
                 patience_counter += 1
