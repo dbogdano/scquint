@@ -42,11 +42,125 @@ class BaseDataset:
     """Minimal compatibility shim for GeneExpressionDataset (deprecated in scvi-tools 1.4+)"""
     pass
 
+class DataLoader:
+    """Minimal data loader wrapper for compatibility."""
+    def __init__(self, dataset, indices, batch_size=128, shuffle=True, use_cuda=False):
+        self.dataset = dataset
+        self.indices = indices
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.use_cuda = use_cuda
+        self.to_monitor = []
+
+    def __iter__(self):
+        order = np.arange(len(self.indices))
+        if self.shuffle:
+            np.random.shuffle(order)
+
+        for start in range(0, len(order), self.batch_size):
+            batch_order = order[start : start + self.batch_size]
+            batch_indices = self.indices[batch_order]
+            
+            x = self.dataset.X[batch_indices]
+            if sp_sparse.issparse(x):
+                x = x.toarray()
+            x = np.asarray(x, dtype=np.float32)
+            x = torch.from_numpy(x)
+            
+            if self.use_cuda:
+                x = x.cuda()
+            
+            # Return (x, local_l_mean, local_l_var, batch_index, labels)
+            batch_size_actual = x.shape[0]
+            local_l_mean = torch.zeros((batch_size_actual, 1), device=x.device)
+            local_l_var = torch.ones((batch_size_actual, 1), device=x.device)
+            batch_index = torch.zeros((batch_size_actual, 1), device=x.device)
+            labels = torch.zeros((batch_size_actual, 1), device=x.device)
+            
+            yield (x, local_l_mean, local_l_var, batch_index, labels)
+
+    def __len__(self):
+        return len(self.indices)
+
+
 class UnsupervisedTrainer_scVI:
     """Minimal compatibility shim for scvi-tools 1.4+ trainer API"""
     def __init__(self, model, gene_dataset, **kwargs):
         self.model = model
         self.gene_dataset = gene_dataset
+        self.kwargs = kwargs
+
+    def train_test_validation(self, model, gene_dataset, train_size=0.8, test_size=None, type_class=None):
+        """Split dataset into train/test/validation sets."""
+        n_cells = gene_dataset.n_cells
+        
+        if test_size is None:
+            test_size = 1.0 - train_size
+        
+        n_train = int(n_cells * train_size)
+        n_test = int(n_cells * test_size)
+        
+        perm = np.random.permutation(n_cells)
+        train_indices = perm[:n_train]
+        test_indices = perm[n_train : n_train + n_test]
+        validation_indices = perm[n_train + n_test:]
+        
+        use_cuda = self.kwargs.get('use_cuda', False)
+        batch_size = self.kwargs.get('data_loader_kwargs', {}).get('batch_size', 128)
+        
+        train_set = DataLoader(gene_dataset, train_indices, batch_size=batch_size, shuffle=True, use_cuda=use_cuda)
+        test_set = DataLoader(gene_dataset, test_indices, batch_size=batch_size, shuffle=False, use_cuda=use_cuda)
+        validation_set = DataLoader(gene_dataset, validation_indices, batch_size=batch_size, shuffle=False, use_cuda=use_cuda)
+        
+        return train_set, test_set, validation_set
+
+    def train(self, n_epochs=300, lr=1e-2, **kwargs):
+        """Train the model."""
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        n_epochs_kl_warmup = self.n_epochs_kl_warmup if hasattr(self, 'n_epochs_kl_warmup') else 20
+        
+        for epoch in range(n_epochs):
+            # KL annealing
+            kl_weight = min(1.0, (epoch + 1) / max(1, n_epochs_kl_warmup))
+            
+            # Training phase
+            self.model.train()
+            train_loss = 0.0
+            n_train = 0
+            for tensors in self.train_set:
+                sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
+                
+                optimizer.zero_grad()
+                reconst_loss, kl_divergence, _ = self.model(
+                    sample_batch, local_l_mean, local_l_var, 
+                    batch_index=batch_index, y=labels
+                )
+                weighted_kl = kl_weight * kl_divergence
+                loss = (reconst_loss + weighted_kl).mean()
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += float(loss.detach().cpu().item()) * sample_batch.shape[0]
+                n_train += sample_batch.shape[0]
+            
+            # Test phase
+            self.model.eval()
+            test_loss = 0.0
+            n_test = 0
+            with torch.no_grad():
+                for tensors in self.test_set:
+                    sample_batch, local_l_mean, local_l_var, batch_index, labels = tensors
+                    reconst_loss, kl_divergence, _ = self.model(
+                        sample_batch, local_l_mean, local_l_var,
+                        batch_index=batch_index, y=labels
+                    )
+                    weighted_kl = kl_weight * kl_divergence
+                    loss = (reconst_loss + weighted_kl).mean()
+                    test_loss += float(loss.detach().cpu().item()) * sample_batch.shape[0]
+                    n_test += sample_batch.shape[0]
+            
+            if ((epoch + 1) % 10 == 0 or epoch == 0):
+                print(f"Epoch {epoch + 1}/{n_epochs} - Train Loss: {train_loss/max(n_train,1):.4f}, Test Loss: {test_loss/max(n_test,1):.4f}, KL weight: {kl_weight:.4f}")
 
 class scVIPosterior:
     """Minimal compatibility shim for scvi-tools 1.4+ posterior API"""

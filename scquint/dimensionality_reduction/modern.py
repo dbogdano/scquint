@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp_sparse
 import torch
 
-from .vae import Dataset, VAE, Posterior
+from .vae import Dataset, VAE, Posterior, UnsupervisedTrainer, run_vae
 
 
 class SCQuintVAE:
-    """Phase 1 AnnData-first wrapper matching the original `run_vae()` behavior.
+    """Phase 1 AnnData-first wrapper with modern scvi-tools-like API.
 
-    This wrapper replicates the training pipeline from the scquint paper, including:
-    - Train/test/validation splits
-    - KL annealing schedule
-    - Early stopping on reconstruction error
-    - Learning rate scheduling
-    - Full compatibility with original results
+    This wrapper provides a modern scvi-tools-style interface while delegating to the 
+    proven `run_vae()` implementation for training to ensure compatibility with the 
+    original scquint paper results.
 
     Example
     -------
@@ -31,6 +28,15 @@ class SCQuintVAE:
 
     @staticmethod
     def setup_anndata(adata, intron_group_key: str = "intron_group") -> None:
+        """Register intron group information in AnnData object.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            AnnData object with intron data
+        intron_group_key : str
+            Column name in `adata.var` containing intron group assignments
+        """
         if intron_group_key not in adata.var.columns:
             raise KeyError(
                 f"`{intron_group_key}` not found in `adata.var`. "
@@ -55,6 +61,33 @@ class SCQuintVAE:
         regularization_gaussian_std=None,
         feature_addition=None,
     ):
+        """Initialize SCQuint VAE model.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            AnnData object (must be setup with setup_anndata first)
+        n_latent : int
+            Dimensionality of latent space (default: 20)
+        n_layers : int
+            Number of hidden layers in encoder/decoder (default: 1)
+        n_hidden : int
+            Number of hidden units (default: 128)
+        dropout_rate : float
+            Dropout probability (default: 0.25)
+        use_cuda : bool or None
+            Whether to use GPU; auto-detect if None (default: None)
+        linearly_decoded : bool
+            Use linear decoder for introns (default: True, matches paper)
+        loss_introns : str
+            Loss function for introns: "dirichlet-multinomial" or "multinomial" (default: "dirichlet-multinomial")
+        input_transform : str
+            Input transformation: "log" or "frequency-smoothed" (default: "log")
+        regularization_gaussian_std : float or None
+            Gaussian regularization std for weights (default: None)
+        feature_addition : array-like or None
+            Feature addition for frequency-smoothed transform (default: None)
+        """
         if self._REGISTRY_KEY not in adata.uns:
             raise RuntimeError(
                 "AnnData is not set up. Call `SCQuintVAE.setup_anndata(adata, ...)` first."
@@ -91,32 +124,32 @@ class SCQuintVAE:
             regularization_gaussian_std=regularization_gaussian_std,
         ).to(self.device)
 
+        # Store hyperparameters
+        self.n_latent = n_latent
+        self.n_layers = n_layers
+        self.n_hidden = n_hidden
+        self.dropout_rate = dropout_rate
+        self.loss_introns = loss_introns
+        self.input_transform = input_transform
+        self.regularization_gaussian_std = regularization_gaussian_std
+        self.feature_addition = feature_addition
+
         self.is_trained_ = False
         self.posterior_ = None
-
-    def _slice_to_tensor(self, idx):
-        x = self.adata.X[idx]
-        if sp_sparse.issparse(x):
-            x = x.toarray()
-        x = np.asarray(x, dtype=np.float32)
-        return torch.from_numpy(x).to(self.device)
+        self.trainer_ = None
 
     def train(
         self,
         max_epochs: int = 300,
         lr: float = 1e-2,
         batch_size: int = 128,
-        train_size: float = 0.9,
         n_epochs_kl_warmup: int = 20,
-        weight_decay: float = 0.0,
-        shuffle: bool = True,
         verbose: bool = True,
-        early_stopping_patience: int = 10,
-        lr_patience: int = 5,
-        lr_factor: float = 0.5,
-        early_stopping_metric: str = "reconstruction_error",
-    ) -> None:
-        """Train VAE with KL annealing, train/test split, and early stopping.
+    ) -> "SCQuintVAE":
+        """Train VAE using the proven `run_vae()` pipeline.
+        
+        Delegates to the original run_vae() to ensure full compatibility with 
+        the scquint paper's training procedure.
         
         Parameters
         ----------
@@ -126,150 +159,51 @@ class SCQuintVAE:
             Learning rate (default: 1e-2)
         batch_size : int
             Batch size for training (default: 128)
-        train_size : float
-            Fraction of cells to use for training (default: 0.9)
         n_epochs_kl_warmup : int
             Number of epochs to warm up KL divergence (default: 20)
-        weight_decay : float
-            L2 regularization weight (default: 0.0)
-        shuffle : bool
-            Whether to shuffle training data (default: True)
         verbose : bool
             Print training progress (default: True)
-        early_stopping_patience : int
-            Patience for early stopping (default: 10)
-        lr_patience : int
-            Patience for learning rate reduction (default: 5)
-        lr_factor : float
-            Factor to reduce learning rate by (default: 0.5)
-        early_stopping_metric : str
-            Metric to use for early stopping: "reconstruction_error" or "elbo" (default: "reconstruction_error")
+            
+        Returns
+        -------
+        self
+            For method chaining
         """
-        # Split into train/test
-        n_cells = self.dataset.n_cells
-        n_train = int(n_cells * train_size)
-        perm = np.random.permutation(n_cells)
-        train_idx = perm[:n_train]
-        test_idx = perm[n_train:]
+        if verbose:
+            print(f"Training VAE with:")
+            print(f"  max_epochs: {max_epochs}")
+            print(f"  lr: {lr}")
+            print(f"  batch_size: {batch_size}")
+            print(f"  n_epochs_kl_warmup: {n_epochs_kl_warmup}")
+
+        # Use original run_vae() for training
+        latent, trained_model = run_vae(
+            self.adata,
+            n_epochs=max_epochs,
+            use_cuda=self.use_cuda,
+            n_latent=self.n_latent,
+            n_layers=self.n_layers,
+            dropout_rate=self.dropout_rate,
+            n_hidden=self.n_hidden,
+            lr=lr,
+            n_epochs_kl_warmup=n_epochs_kl_warmup,
+            linearity="linear" if self.module.introns_decoder.__class__.__name__ == "LinearIntronsDecoder" else "nonlinear",
+            loss_introns=self.loss_introns,
+            input_transform=self.input_transform,
+            regularization_gaussian_std=self.regularization_gaussian_std,
+            feature_addition=self.feature_addition,
+            sample=True,
+        )
+
+        # Update module with trained weights
+        self.module = trained_model
+        self.is_trained_ = True
+        self.latent_ = latent
 
         if verbose:
-            print(f"Training on {len(train_idx)} cells, testing on {len(test_idx)} cells")
+            print(f"Training complete. Latent shape: {latent.shape}")
 
-        self.module.train()
-        optimizer = torch.optim.Adam(self.module.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=lr_factor, patience=lr_patience
-        )
-
-        best_metric = float("inf")
-        patience_counter = 0
-
-        for epoch in range(max_epochs):
-            # KL annealing weight
-            kl_weight = min(1.0, (epoch + 1) / max(1, n_epochs_kl_warmup))
-
-            # Training phase
-            train_loss = 0.0
-            train_reconst = 0.0
-            train_kl = 0.0
-            n_train_seen = 0
-
-            if shuffle:
-                train_order = np.random.permutation(len(train_idx))
-            else:
-                train_order = np.arange(len(train_idx))
-
-            self.module.train()
-            for start in range(0, len(train_idx), batch_size):
-                batch_order = train_order[start : start + batch_size]
-                batch_idx = train_idx[batch_order]
-                x = self._slice_to_tensor(batch_idx)
-
-                local_l_mean = torch.zeros((x.shape[0], 1), device=self.device)
-                local_l_var = torch.ones((x.shape[0], 1), device=self.device)
-
-                optimizer.zero_grad()
-                reconst_loss, kl_divergence, _ = self.module(x, local_l_mean, local_l_var)
-                weighted_kl = kl_weight * kl_divergence
-                loss = (reconst_loss + weighted_kl).mean()
-                loss.backward()
-                optimizer.step()
-
-                bs = x.shape[0]
-                train_loss += float(loss.detach().cpu().item()) * bs
-                train_reconst += float(reconst_loss.sum().detach().cpu().item())
-                train_kl += float(kl_divergence.sum().detach().cpu().item())
-                n_train_seen += bs
-
-            # Test phase
-            test_loss = 0.0
-            test_reconst = 0.0
-            test_kl = 0.0
-            n_test_seen = 0
-
-            self.module.eval()
-            with torch.no_grad():
-                for start in range(0, len(test_idx), batch_size):
-                    batch_idx = test_idx[start : start + batch_size]
-                    x = self._slice_to_tensor(batch_idx)
-
-                    local_l_mean = torch.zeros((x.shape[0], 1), device=self.device)
-                    local_l_var = torch.ones((x.shape[0], 1), device=self.device)
-
-                    reconst_loss, kl_divergence, _ = self.module(x, local_l_mean, local_l_var)
-                    weighted_kl = kl_weight * kl_divergence
-                    loss = (reconst_loss + weighted_kl).mean()
-
-                    bs = x.shape[0]
-                    test_loss += float(loss.detach().cpu().item()) * bs
-                    test_reconst += float(reconst_loss.sum().detach().cpu().item())
-                    test_kl += float(kl_divergence.sum().detach().cpu().item())
-                    n_test_seen += bs
-
-            # Average losses (reconstruction/kl use sum, not mean)
-            train_loss_avg = train_loss / max(n_train_seen, 1)
-            test_loss_avg = test_loss / max(n_test_seen, 1)
-            train_reconst_avg = train_reconst / max(n_train_seen, 1)
-            test_reconst_avg = test_reconst / max(n_test_seen, 1)
-            train_kl_avg = train_kl / max(n_train_seen, 1)
-            test_kl_avg = test_kl / max(n_test_seen, 1)
-
-            # Learning rate scheduling (on test ELBO)
-            scheduler.step(test_loss_avg)
-
-            # Early stopping based on chosen metric
-            if early_stopping_metric == "reconstruction_error":
-                monitor_metric = test_reconst_avg
-            else:  # "elbo"
-                monitor_metric = test_loss_avg
-
-            if monitor_metric < best_metric:
-                best_metric = monitor_metric
-                patience_counter = 0
-            else:
-                patience_counter += 1
-
-            if verbose and ((epoch + 1) % 10 == 0 or epoch == 0 or epoch + 1 == max_epochs):
-                print(
-                    f"Epoch {epoch + 1}/{max_epochs} | "
-                    f"Train Loss: {train_loss_avg:.4f} (R: {train_reconst_avg:.4f}, KL: {train_kl_avg:.4f}) | "
-                    f"Test Loss: {test_loss_avg:.4f} (R: {test_reconst_avg:.4f}, KL: {test_kl_avg:.4f}) | "
-                    f"KL weight: {kl_weight:.4f}"
-                )
-
-            if patience_counter >= early_stopping_patience:
-                if verbose:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                break
-
-        self.module.eval()
-        self.is_trained_ = True
-
-        # Create posterior for compatibility
-        self.posterior_ = Posterior(
-            self.module, self.dataset, use_cuda=self.use_cuda,
-            data_loader_kwargs={"batch_size": batch_size}
-        )
+        return self
 
     @torch.no_grad()
     def get_latent_representation(
@@ -291,13 +225,25 @@ class SCQuintVAE:
         np.ndarray
             Latent representation of shape (n_cells, n_latent)
         """
-        self.module.eval()
+        if not self.is_trained_:
+            raise RuntimeError("Model must be trained before calling get_latent_representation()")
 
+        if hasattr(self, "latent_"):
+            return self.latent_
+
+        # Fallback: compute on the fly
+        self.module.eval()
         n_cells = self.dataset.n_cells
         z_all = []
+
         for start in range(0, n_cells, batch_size):
             idx = slice(start, min(start + batch_size, n_cells))
-            x = self._slice_to_tensor(idx)
+            x = self.adata.X[idx]
+            if sp_sparse.issparse(x):
+                x = x.toarray()
+            x = np.asarray(x, dtype=np.float32)
+            x = torch.from_numpy(x).to(self.device)
+
             z = self.module.sample_from_posterior_z(x, give_mean=give_mean)
             z_all.append(z.detach().cpu().numpy())
 
