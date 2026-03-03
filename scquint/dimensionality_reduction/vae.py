@@ -12,9 +12,26 @@ import torch.nn.functional as F
 import torch.optim as optim
 from pyro.distributions import DirichletMultinomial, Gamma
 from scipy import sparse as sp_sparse
-from scvi.module import DecoderSCVI, Encoder
-from scvi.nn import FCLayers, one_hot
-from scvi.distributions import NegativeBinomial, ZeroInflatedNegativeBinomial
+
+# scvi-tools compatibility across versions/namespaces
+try:
+    from scvi.nn import DecoderSCVI, Encoder, FCLayers, one_hot
+except ImportError:
+    try:
+        from scvi.module import DecoderSCVI, Encoder
+        from scvi.nn import FCLayers, one_hot
+    except ImportError:
+        from scvi_tools.nn import DecoderSCVI, Encoder, FCLayers
+        from scvi_tools.utils import one_hot
+
+try:
+    from scvi.distributions._negative_binomial import log_nb_positive, log_zinb_positive
+except ImportError:
+    try:
+        from scvi.model.base._log_likelihood import log_nb_positive, log_zinb_positive
+    except ImportError:
+        from scvi_tools.models.log_likelihood import log_nb_positive, log_zinb_positive
+
 from torch.distributions import Dirichlet, Laplace, Multinomial, Normal
 from torch.distributions import kl_divergence as kl
 
