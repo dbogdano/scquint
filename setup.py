@@ -15,6 +15,7 @@ install_requires = [
     "pandas",
     "scipy",
     "tqdm",
+    "zarr<3",
 ]
 
 
