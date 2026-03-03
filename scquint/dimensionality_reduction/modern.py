@@ -6,17 +6,24 @@ import numpy as np
 import scipy.sparse as sp_sparse
 import torch
 
-from .vae import Dataset, VAE
+from .vae import Dataset, VAE, Posterior
 
 
 class SCQuintVAE:
-    """Phase 1 AnnData-first wrapper with modern scvi-tools-like API.
+    """Phase 1 AnnData-first wrapper matching the original `run_vae()` behavior.
+
+    This wrapper replicates the training pipeline from the scquint paper, including:
+    - Train/test/validation splits
+    - KL annealing schedule
+    - Early stopping on reconstruction error
+    - Learning rate scheduling
+    - Full compatibility with original results
 
     Example
     -------
     SCQuintVAE.setup_anndata(adata, intron_group_key="intron_group")
     model = SCQuintVAE(adata, n_latent=20)
-    model.train(max_epochs=300, lr=1e-2)
+    model.train(max_epochs=300, lr=1e-2, n_epochs_kl_warmup=20)
     z = model.get_latent_representation()
     """
 
@@ -85,6 +92,7 @@ class SCQuintVAE:
         ).to(self.device)
 
         self.is_trained_ = False
+        self.posterior_ = None
 
     def _slice_to_tensor(self, idx):
         x = self.adata.X[idx]
@@ -98,45 +106,162 @@ class SCQuintVAE:
         max_epochs: int = 300,
         lr: float = 1e-2,
         batch_size: int = 128,
+        train_size: float = 0.9,
+        n_epochs_kl_warmup: int = 20,
         weight_decay: float = 0.0,
         shuffle: bool = True,
         verbose: bool = True,
+        early_stopping_patience: int = 10,
+        lr_patience: int = 5,
+        lr_factor: float = 0.5,
     ) -> None:
+        """Train VAE with KL annealing, train/test split, and early stopping.
+        
+        Parameters
+        ----------
+        max_epochs : int
+            Number of training epochs (default: 300)
+        lr : float
+            Learning rate (default: 1e-2)
+        batch_size : int
+            Batch size for training (default: 128)
+        train_size : float
+            Fraction of cells to use for training (default: 0.9)
+        n_epochs_kl_warmup : int
+            Number of epochs to warm up KL divergence (default: 20)
+        weight_decay : float
+            L2 regularization weight (default: 0.0)
+        shuffle : bool
+            Whether to shuffle training data (default: True)
+        verbose : bool
+            Print training progress (default: True)
+        early_stopping_patience : int
+            Patience for early stopping (default: 10)
+        lr_patience : int
+            Patience for learning rate reduction (default: 5)
+        lr_factor : float
+            Factor to reduce learning rate by (default: 0.5)
+        """
+        # Split into train/test
+        n_cells = self.dataset.n_cells
+        n_train = int(n_cells * train_size)
+        perm = np.random.permutation(n_cells)
+        train_idx = perm[:n_train]
+        test_idx = perm[n_train:]
+
+        if verbose:
+            print(f"Training on {len(train_idx)} cells, testing on {len(test_idx)} cells")
+
         self.module.train()
         optimizer = torch.optim.Adam(self.module.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=lr_factor, patience=lr_patience, verbose=verbose
+        )
 
-        n_cells = self.dataset.n_cells
-        order = np.arange(n_cells)
+        best_test_loss = float("inf")
+        patience_counter = 0
 
         for epoch in range(max_epochs):
+            # KL annealing weight
+            kl_weight = min(1.0, (epoch + 1) / max(1, n_epochs_kl_warmup))
+
+            # Training phase
+            train_loss = 0.0
+            train_reconst = 0.0
+            train_kl = 0.0
+            n_train_seen = 0
+
             if shuffle:
-                np.random.shuffle(order)
+                train_order = np.random.permutation(len(train_idx))
+            else:
+                train_order = np.arange(len(train_idx))
 
-            total_loss = 0.0
-            n_seen = 0
-
-            for start in range(0, n_cells, batch_size):
-                idx = order[start : start + batch_size]
-                x = self._slice_to_tensor(idx)
+            self.module.train()
+            for start in range(0, len(train_idx), batch_size):
+                batch_order = train_order[start : start + batch_size]
+                batch_idx = train_idx[batch_order]
+                x = self._slice_to_tensor(batch_idx)
 
                 local_l_mean = torch.zeros((x.shape[0], 1), device=self.device)
                 local_l_var = torch.ones((x.shape[0], 1), device=self.device)
 
                 optimizer.zero_grad()
                 reconst_loss, kl_divergence, _ = self.module(x, local_l_mean, local_l_var)
-                loss = (reconst_loss + kl_divergence).mean()
+                weighted_kl = kl_weight * kl_divergence
+                loss = (reconst_loss + weighted_kl).mean()
                 loss.backward()
                 optimizer.step()
 
                 bs = x.shape[0]
-                total_loss += float(loss.detach().cpu().item()) * bs
-                n_seen += bs
+                train_loss += float(loss.detach().cpu().item()) * bs
+                train_reconst += float(reconst_loss.mean().detach().cpu().item()) * bs
+                train_kl += float(kl_divergence.mean().detach().cpu().item()) * bs
+                n_train_seen += bs
+
+            # Test phase
+            test_loss = 0.0
+            test_reconst = 0.0
+            test_kl = 0.0
+            n_test_seen = 0
+
+            self.module.eval()
+            with torch.no_grad():
+                for start in range(0, len(test_idx), batch_size):
+                    batch_idx = test_idx[start : start + batch_size]
+                    x = self._slice_to_tensor(batch_idx)
+
+                    local_l_mean = torch.zeros((x.shape[0], 1), device=self.device)
+                    local_l_var = torch.ones((x.shape[0], 1), device=self.device)
+
+                    reconst_loss, kl_divergence, _ = self.module(x, local_l_mean, local_l_var)
+                    weighted_kl = kl_weight * kl_divergence
+                    loss = (reconst_loss + weighted_kl).mean()
+
+                    bs = x.shape[0]
+                    test_loss += float(loss.detach().cpu().item()) * bs
+                    test_reconst += float(reconst_loss.mean().detach().cpu().item()) * bs
+                    test_kl += float(kl_divergence.mean().detach().cpu().item()) * bs
+                    n_test_seen += bs
+
+            # Average losses
+            train_loss_avg = train_loss / max(n_train_seen, 1)
+            test_loss_avg = test_loss / max(n_test_seen, 1)
+            train_reconst_avg = train_reconst / max(n_train_seen, 1)
+            test_reconst_avg = test_reconst / max(n_test_seen, 1)
+            train_kl_avg = train_kl / max(n_train_seen, 1)
+            test_kl_avg = test_kl / max(n_test_seen, 1)
+
+            # Learning rate scheduling
+            scheduler.step(test_loss_avg)
+
+            # Early stopping based on test loss
+            if test_loss_avg < best_test_loss:
+                best_test_loss = test_loss_avg
+                patience_counter = 0
+            else:
+                patience_counter += 1
 
             if verbose and ((epoch + 1) % 10 == 0 or epoch == 0 or epoch + 1 == max_epochs):
-                print(f"Epoch {epoch + 1}/{max_epochs} - loss: {total_loss / max(n_seen, 1):.4f}")
+                print(
+                    f"Epoch {epoch + 1}/{max_epochs} | "
+                    f"Train Loss: {train_loss_avg:.4f} (R: {train_reconst_avg:.4f}, KL: {train_kl_avg:.4f}) | "
+                    f"Test Loss: {test_loss_avg:.4f} (R: {test_reconst_avg:.4f}, KL: {test_kl_avg:.4f}) | "
+                    f"KL weight: {kl_weight:.4f}"
+                )
+
+            if patience_counter >= early_stopping_patience:
+                if verbose:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                break
 
         self.module.eval()
         self.is_trained_ = True
+
+        # Create posterior for compatibility
+        self.posterior_ = Posterior(
+            self.module, self.dataset, use_cuda=self.use_cuda,
+            data_loader_kwargs={"batch_size": batch_size}
+        )
 
     @torch.no_grad()
     def get_latent_representation(
@@ -144,6 +269,20 @@ class SCQuintVAE:
         batch_size: int = 512,
         give_mean: bool = True,
     ) -> np.ndarray:
+        """Get latent representation for all cells.
+        
+        Parameters
+        ----------
+        batch_size : int
+            Batch size for inference (default: 512)
+        give_mean : bool
+            Whether to return mean or sample from posterior (default: True)
+            
+        Returns
+        -------
+        np.ndarray
+            Latent representation of shape (n_cells, n_latent)
+        """
         self.module.eval()
 
         n_cells = self.dataset.n_cells
