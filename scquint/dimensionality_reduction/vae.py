@@ -175,13 +175,17 @@ class Dataset(BaseDataset):
         self.n_genes = 0  # for compatibility
         self.genes = []
         self.obs = adata.obs
-        self.var = adata.var
+        self.var = adata.var.copy()
         self.n_cells = len(self.obs)
         print("n_cells: ", self.n_cells)
         self.n_introns = len(self.var)
         self.var.intron_group = relabel(self.var.intron_group)
-        self.n_intron_groups = int(self.var.intron_group.max() + 1)
-        self.intron_groups = self.var.intron_group.values.astype(int)
+        # Convert to numeric if categorical to allow .max()
+        intron_group_vals = self.var.intron_group
+        if hasattr(intron_group_vals, 'cat'):  # is categorical
+            intron_group_vals = intron_group_vals.astype(int)
+        self.n_intron_groups = int(intron_group_vals.max() + 1)
+        self.intron_groups = intron_group_vals.astype(int).values
         print("n_intron_groups: ", self.n_intron_groups)
         self.X = adata.X
         self.batch_indices = np.arange(self.n_cells)
