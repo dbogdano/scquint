@@ -1,3 +1,3 @@
-from .vae import Posterior, UnsupervisedTrainer, VAE
+from .vae import Dataset, Posterior, UnsupervisedTrainer, VAE
 
-__all__ = ["VAE", "UnsupervisedTrainer", "Posterior"]
+__all__ = ["Dataset", "VAE", "UnsupervisedTrainer", "Posterior"]
