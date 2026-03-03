@@ -15,6 +15,7 @@ install_requires = [
     "pandas",
     "scipy",
     "tqdm",
+    "scvi-tools>=1.4.2",
     "zarr<3",
 ]
 
