@@ -49,7 +49,7 @@ class DataLoader:
         self.indices = indices
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.use_cuda = use_cuda
+        self.device = torch.device("cuda:0" if use_cuda else "cpu")
         self.to_monitor = []
 
     def __iter__(self):
@@ -65,17 +65,14 @@ class DataLoader:
             if sp_sparse.issparse(x):
                 x = x.toarray()
             x = np.asarray(x, dtype=np.float32)
-            x = torch.from_numpy(x)
-            
-            if self.use_cuda:
-                x = x.cuda()
+            x = torch.from_numpy(x).to(self.device)
             
             # Return (x, local_l_mean, local_l_var, batch_index, labels)
             batch_size_actual = x.shape[0]
-            local_l_mean = torch.zeros((batch_size_actual, 1), device=x.device)
-            local_l_var = torch.ones((batch_size_actual, 1), device=x.device)
-            batch_index = torch.zeros((batch_size_actual, 1), device=x.device)
-            labels = torch.zeros((batch_size_actual, 1), device=x.device)
+            local_l_mean = torch.zeros((batch_size_actual, 1), dtype=torch.float32, device=self.device)
+            local_l_var = torch.ones((batch_size_actual, 1), dtype=torch.float32, device=self.device)
+            batch_index = torch.zeros((batch_size_actual, 1), dtype=torch.long, device=self.device)
+            labels = torch.zeros((batch_size_actual, 1), dtype=torch.long, device=self.device)
             
             yield (x, local_l_mean, local_l_var, batch_index, labels)
 
@@ -116,6 +113,11 @@ class UnsupervisedTrainer_scVI:
 
     def train(self, n_epochs=300, lr=1e-2, **kwargs):
         """Train the model."""
+        # Ensure model is on the right device
+        use_cuda = self.kwargs.get('use_cuda', False)
+        device = torch.device("cuda:0" if use_cuda else "cpu")
+        self.model = self.model.to(device)
+        
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         n_epochs_kl_warmup = self.n_epochs_kl_warmup if hasattr(self, 'n_epochs_kl_warmup') else 20
         
