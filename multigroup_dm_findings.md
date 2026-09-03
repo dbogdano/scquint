@@ -37,9 +37,13 @@ An 8x deflation at ΔΨ = 0.40. The K-group model recovers the true value
 throughout. One correction to the doc's account: the current model has a *single*
 shared `log_alpha` (`DirichletMultinomialGLM.log_alpha` is a scalar), so there is
 no separate inflated `α_rest`. The shared α is dragged down for both groups. This
-also means the K-group model fixes the problem *with a shared α* — per-group
-`α_k` is a second-order refinement, not the mechanism. Default to
-`alpha_mode="shared"`.
+also means the K-group model fixes *this* problem with a shared α — per-group
+`α_k` is not the mechanism here.
+
+That is not an argument for defaulting to `alpha_mode="shared"`, which is what
+this section originally concluded. A shared α turns out to be anti-conservative
+whenever the true overdispersion varies across cell types, and the default is now
+`per_group`. See §5a.
 
 ## 2. In this simulation it did not buy power — and the simulation was wrong
 
@@ -91,21 +95,40 @@ Re-simulating with the rest pool drawn independently of the target (18 groups,
 | moderate (1.0) | **0.180** | 0.047 | 5e-16 | 0.26 |
 | strong (2.0) | **0.293** | 0.057 | 3e-39 | 0.95 |
 
-The K-group test is calibrated throughout. The **two-group test is not**: at
-nominal 5% it rejects 18–29% of true nulls once the rest pool is heterogeneous.
-A pooled mixture of differing cell types is not Dirichlet-multinomial, so the
-two-group model is misspecified in exactly the configuration every one-vs-rest
-test on this data actually faces.
+The power gain reproduces. **The two-group FPR column does not generalize and
+should not be relied on** — see §2b. This simulation's conditions (~3 reads/cell,
+group sizes from 25 to 2,545, rest PSI drawn from a diffuse `Dirichlet(base*1.5)`)
+are far more extreme than the real data, and a parametric bootstrap built from
+the real fit finds the two-group test calibrated.
 
-This changes the reading of the +41%. It is not only that the K-group test has
-more power; the baseline it is being compared against is itself anti-conservative
-in this regime, so the two-group count of 2,034 may include excess false
-positives, and the 76 events unique to the two-group model are the first place to
-look for them. It also means the *true*-discovery gap could be larger than +41%.
+## 2b. The two-group inflation above does not hold on real data — withdrawn
 
-Because the power comparison above is at matched nominal α rather than matched
-FPR, treat the power table as indicative only: "power 0.740" for a test running
-at an 18% false positive rate is not comparable to 0.933 for a calibrated one.
+A parametric bootstrap on 3prime (500 intron groups, 4 target cell types, 20
+replicates each, 14,680 total; target PSI replaced by the cell-count-weighted
+mean of the other groups; **real per-cell coverage retained**) finds both models
+calibrated:
+
+| | multi-group FPR | two-group FPR |
+|---|---:|---:|
+| overall (14,680 replicates) | 0.0525 | 0.0507 |
+
+Stratifying by rest-pool heterogeneity shows no two-group inflation in any
+quartile — the top quartile (max pairwise PSI distance > 0.53) gives two-group
+FPR 0.051, and the correlation between heterogeneity and the two-group-minus-
+multi-group FPR gap is *negative* (Spearman ρ = −0.19).
+
+That bootstrap outranks the simulation above: it retains real coverage, real PSI
+heterogeneity, real group sizes and real α. It is also structurally generous to
+the inflation hypothesis, since it simulates from a shared-α DM built on the
+K-group fit — the configuration in which the K-group model is correctly specified
+and the two-group model is the misspecified one. The inflation still did not
+appear.
+
+So the +41% is a **power gain**, not a correction of two-group false positives,
+and the 76 events unique to the two-group model should not be presumed false.
+
+The simulated inflation is presumably a real phenomenon at extreme sparsity and
+extreme heterogeneity; it just is not the regime 3prime occupies.
 
 Three inflation hypotheses were checked against the real data and all failed:
 
@@ -126,19 +149,20 @@ log-likelihood by 0.0000, so the constrained null is not under-converging.
 Shuffling cell type labels makes every group's PSI identical, which is precisely
 the regime where **both** tests are calibrated — the identical-groups rows above
 show two-group and K-group FPRs matching to three decimals. So the permutation
-result correctly establishes that the K-group test is not inflated, but it is
-structurally blind to the failure mode that actually matters here: it destroys
-the between-cell-type heterogeneity that miscalibrates the two-group test. It
-therefore does not validate the baseline.
+result establishes that the K-group test is not inflated under a global null, but
+it cannot speak to behaviour under heterogeneity, because it destroys the
+heterogeneity. The parametric bootstrap in §2b is what covers that gap, and it
+came out clean for both models.
 
-A diagnostic that does preserve heterogeneity is a parametric bootstrap null.
-The K-group run already yields per-cell-type PSI, per-intron-group α, and the
-real coverage pattern. Simulate counts from that fit with the target's PSI
-replaced by the weighted mean of the other groups' — H0 true by construction,
-with realistic heterogeneity, sparsity and overdispersion retained — then run
-both tests. Note that a simpler split-half control (halve one cell type and test
-one half vs. rest) does *not* work: the rest pool still contains the other real
-cell types, so the one-vs-rest null is false for that half regardless.
+The diagnostic that does preserve heterogeneity is the parametric bootstrap null
+reported in §2b: simulate from the K-group fit — per-cell-type PSI,
+per-intron-group α, real coverage — with the target's PSI replaced by the
+weighted mean of the others, so H0 holds by construction while realistic
+heterogeneity, sparsity and overdispersion are retained.
+
+Worth recording a tempting alternative that does *not* work: a split-half control
+(halve one cell type, test one half vs. rest) leaves the other real cell types in
+the rest pool, so the one-vs-rest null is false for that half regardless.
 
 ## 3. The proposed null model is wrong — two separate problems
 
@@ -237,13 +261,88 @@ Also fixed, unrelated: `_run_differential_splicing` crashed with
 `KeyError: "None of ['index'] are in the columns"` whenever `adata.var.index` had
 a name. Both paths now use `rename_axis("index")`.
 
+## 5a. The shared-alpha assumption is the real vulnerability
+
+Biomni's per-group-alpha simulation found the K-group model anti-conservative
+when overdispersion varies across cell types. This replicates, more strongly than
+reported, and — importantly — `alpha_mode="per_group"` fixes it completely.
+
+DGP has per-group alpha (log-uniform over the stated range, target fixed at 2);
+both models otherwise 500 cells/group, Poisson(20), 3 junctions, 200 reps. FPR at
+nominal 0.05:
+
+| DGP alpha | n_rest | `alpha_mode="shared"` | `alpha_mode="per_group"` |
+|---|---:|---:|---:|
+| shared (2.0) | 3 | 0.020 | 0.015 |
+| shared (2.0) | 5 | 0.050 | 0.040 |
+| per-group (0.5–5) | 3 | **0.420** | 0.040 |
+| per-group (0.5–5) | 5 | **0.255** | 0.025 |
+| per-group (0.5–5) | 10 | **0.165** | 0.050 |
+| per-group (0.5–5) | 17 | **0.125** | 0.035 |
+| extreme (0.3–10) | 3 | **0.660** | 0.055 |
+| extreme (0.3–10) | 5 | **0.450** | 0.025 |
+| extreme (0.3–10) | 10 | **0.320** | 0.040 |
+| extreme (0.3–10) | 17 | **0.205** | 0.065 |
+
+Two conclusions.
+
+**The inflation does not vanish with many groups.** It decays monotonically in
+the number of rest groups but is still 0.205 and 0.125 at n_rest = 17 — the
+3prime configuration — i.e. 2.5–4x nominal. Biomni's §3 point 3, that 10+ rest
+groups are safe, does not replicate: n_rest = 10 gives 0.320 and 0.165.
+
+**`per_group` is calibrated everywhere and costs nothing.** It sits at nominal
+under both a shared-alpha DGP and a per-group-alpha DGP, so there is no
+bias–robustness tradeoff to weigh. The earlier recommendation in §1 to default to
+`alpha_mode="shared"` was wrong: it was argued from parameter count and
+small-group stability without ever testing it against a per-group-alpha DGP.
+
+Note this table's `mg shared` vs `mg per_group` contrast is internally valid —
+both use the same H0 construction, which is the K-group test's own null. The
+two-group column from the same runs is *not* usable, for the reason in §2b.
+
+### At 3prime's sparsity the exposure is much smaller
+
+The table above uses Poisson(20) coverage. Repeating it at 3prime's actual
+sparsity and group-size distribution (18 groups, 25–2,545 cells, alpha drawn
+log-uniform over (0.3, 10), target fixed at 2) changes the magnitude a lot:
+
+| DGP alpha | reads/cell | `shared` FPR | `per_group` FPR | `shared` power | `per_group` power |
+|---|---:|---:|---:|---:|---:|
+| shared | 2 | 0.060 | 0.070 | 0.990 | 0.990 |
+| shared | 20 | 0.070 | 0.055 | 1.000 | 1.000 |
+| extreme | 2 | 0.100 | 0.090 | 0.980 | 0.995 |
+| extreme | 20 | **0.595** | 0.080 | 0.930 | 1.000 |
+
+Sparsity *masks* the misspecification: with ~3 reads per cell there is not enough
+information to resolve the differing alphas, so `shared` sits at 0.100 rather
+than 0.595. So 3prime's worst-case exposure is roughly 2x nominal, not the
+4–12x the Poisson(20) table implies — and only under an extreme alpha spread that
+has not been shown to exist in the data.
+
+Two consequences:
+
+**`per_group` is now the default.** It was never worse than `shared` on either
+false positive rate or power in any configuration tested, and is dramatically
+better in one. Power is equal or slightly higher (0.995 vs. 0.980, 1.000 vs.
+0.930). Pass `alpha_mode="shared"` to reproduce the original 3prime run.
+
+**`per_group` is not a complete fix at extreme sparsity.** Under extreme
+per-group alpha at 2 reads/cell both modes sit near 0.09–0.10. Whatever residual
+inflation exists there is a property of the information available, not of the
+alpha parameterization.
+
+Whether any of this touches 3prime still depends on the real alpha spread across
+cell types, which has not been measured — see §8 item 1.
+
 ## 6. Recommendation
 
-The K-group refit is correct, calibrated, cheap, and — per the 3prime run —
-delivers a real +41% gain in significant intron groups, with the largest
-proportional gains in the cell types whose "rest" pool is most similar to them.
-Use it. Defaults: `alpha_mode="shared"`, `weights="cells"`,
-`null_space="simplex"`.
+The K-group refit is correct, cheap, and — per the 3prime run — delivers a real
++41% gain in significant intron groups, with the largest proportional gains in
+the cell types whose "rest" pool is most similar to them. Use it, but with
+`alpha_mode="per_group"` rather than `"shared"` (see §5a); `weights="cells"` and
+`null_space="simplex"` are fine as they stand. Pass `alpha_mode="shared"`
+explicitly to reproduce the original 3prime run.
 
 It is still not a substitute for changing the reference group. The pooled IN vs
 EN test gave 606 significant events against 77 for MGE vs rest in the full
@@ -274,3 +373,47 @@ them (0.88x). But `opt_warning` only fires when `ll_null > ll_alt` and so never
 flags this, which was a real gap in the diagnostics. There is now a `low_alpha`
 column (threshold `LOW_ALPHA_THRESHOLD = 1e-2`) so these tests can be identified
 and weighted accordingly.
+
+## 8. Benchmarking: what has been run, and what is still needed
+
+### Already run
+
+| check | where | outcome |
+|---|---|---|
+| Exact reduction at K=2 | §5 | p-values match `run_regression` to 5 s.f. |
+| Calibration, homogeneous groups | §5 | 0.057 vs. 0.057 (two-group) |
+| Calibration, 18 sparse groups | §2a | FPR matches two-group to 3 decimals, down to 8 covered cells in the smallest group |
+| Null under-convergence | §2a | restarts improve ll by 0.0000 |
+| Label permutation on real data | §2a | 0 sig for both; raw p<0.05 of 4.93% / 5.37% |
+| Parametric bootstrap on real data | §2b | both calibrated; 0.0525 / 0.0507 over 14,680 replicates |
+| Weighting sensitivity | §2a | 153 vs. 151 sig, ρ = 0.9995 |
+| Low-α stratification | §7 | gained events depleted for low α (0.88x) |
+| Per-group-α DGP, `shared` vs `per_group` | §5a | `shared` inflated to 0.125–0.660; `per_group` at nominal |
+
+### Still needed, in priority order
+
+1. **Per-group α spread on real data.** Fit a DM per cell type per intron group
+   and look at the dispersion of α across cell types. This is the single number
+   that decides whether the 3prime run is affected by §5a; everything in §5a is
+   conditional on it. Narrow spread → 3prime stands. Wide spread → the
+   shared-α run is anti-conservative and the +41% needs re-deriving.
+
+2. **Re-run 3prime with `alpha_mode="per_group"`.** One run, and it is both the
+   diagnostic and the remedy: if 2,867 holds, the shared-α result was fine
+   anyway; if it drops materially, `per_group` is the number to report. Cheaper
+   than (1) and answers the same practical question.
+
+3. **Per-group-α parametric bootstrap.** The bootstrap in §2b simulates from a
+   shared-α DM, so it is structurally blind to §5a. Redo it drawing per-group α
+   from the spread measured in (1).
+
+4. **Cross-implementation reconciliation.** My two-group FPR (0.24–0.91) and
+   Biomni's (~0.05) disagree qualitatively, not by a tunable parameter. Run both
+   implementations on *identical* simulated `y`/`codes` arrays. Same p-values →
+   the difference is data generation, and the arithmetic-mean-vs-KL point in §2b
+   is the likely cause. Different p-values → one implementation has a bug.
+
+5. **5prime run**, once (1)–(2) settle which `alpha_mode` to use.
+
+6. **S4 (coverage-stratified Storey) on the multi-group p-values**, which gave
+   +33% over BH on the two-group results and may compound.

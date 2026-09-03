@@ -2,6 +2,7 @@ import anndata
 from collections import defaultdict
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp_sparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -582,7 +583,7 @@ def run_regression_multigroup(args):
     one block of rows per target.
     """
     intron_group, y, group_codes, targets, n_groups, opts = args
-    alpha_mode = opts.get("alpha_mode", "shared")
+    alpha_mode = opts.get("alpha_mode", "per_group")
     weights_mode = opts.get("weights", "cells")
     min_cells_per_target = opts.get("min_cells_per_target", 30)
     min_cells_per_group = opts.get("min_cells_per_group", 10)
@@ -741,7 +742,7 @@ def _run_differential_splicing_multigroup(
     n_jobs=None,
     do_regroup=False,
     min_global_proportion=1e-3,
-    alpha_mode="shared",
+    alpha_mode="per_group",
     weights="cells",
     null_space="simplex",
 ):
@@ -793,10 +794,21 @@ def _run_differential_splicing_multigroup(
     for i, c in enumerate(intron_groups):
         intron_group_introns[c].append(i)
 
-    X = adata.X.toarray()  # for easier parallelization using Python's libraries
+    # Densify one intron group at a time rather than the whole matrix. A dense
+    # copy is n_cells * n_introns * 8 bytes, which for a full 3prime run is
+    # 74,327 x 32,911 x 8 = 19.6 GB and pushes a 32 GB worker into swap; the
+    # per-intron-group slices are a couple of MB each. CSC so that column
+    # slicing is cheap.
+    X = adata.X
+    X = X.tocsc() if sp_sparse.issparse(X) else np.asarray(X)
+
+    def get_y(c):
+        cols = intron_group_introns[c]
+        y = X[:, cols]
+        return y.toarray() if sp_sparse.issparse(y) else y
 
     def make_args(c):
-        return (c, X[:, intron_group_introns[c]], group_codes, target_codes, n_groups, opts)
+        return (c, get_y(c), group_codes, target_codes, n_groups, opts)
 
     if n_jobs is not None and n_jobs != 1:
         dfs_intron_group, dfs_intron = zip(
@@ -826,7 +838,7 @@ def run_differential_splicing_multigroup(
     adata,
     groupby,
     targets=None,
-    alpha_mode="shared",
+    alpha_mode="per_group",
     weights="cells",
     null_space="simplex",
     **kwargs,
@@ -862,12 +874,24 @@ def run_differential_splicing_multigroup(
         Column in `adata.obs` holding the group (e.g. cell type) of each cell.
     targets : list, optional
         Groups to test. Defaults to all groups.
-    alpha_mode : {"shared", "per_group"}
-        Whether to fit one concentration parameter for all cells or one per group.
-        "shared" is recommended as the default: the K-group mean structure is what
-        removes between-group variance from the residual, while per-group
-        concentrations add K-1 parameters that are poorly determined for small
-        groups.
+    alpha_mode : {"per_group", "shared"}
+        Whether to fit one concentration parameter per group or one for all cells.
+        Defaults to "per_group". If the true overdispersion varies across cell
+        types, "shared" is anti-conservative - in simulation with 18 groups and
+        alpha drawn log-uniform over (0.3, 10), its false positive rate at nominal
+        0.05 reaches 0.595 at 20 reads/cell (0.100 at 2 reads/cell), while
+        "per_group" stays at 0.080 and 0.090. "per_group" was never worse than
+        "shared" on either false positive rate or power in any configuration
+        tested, including at 3prime's sparsity and group-size distribution, so
+        there is no tradeoff to weigh.
+
+        Note the residual: under *extreme* per-group alpha variation at ~2
+        reads/cell, both modes sit near 0.09-0.10, so sparsity limits how much
+        "per_group" can recover. Sparsity also masks the problem - the severe
+        inflation needs enough coverage to detect the alpha differences at all.
+
+        Pass "shared" explicitly to reproduce results generated before this
+        default changed (the 3prime run in multigroup_3prime_results.md).
     weights : {"cells", "reads", "equal"}
         How the "rest" reference is weighted across the non-target groups.
     null_space : {"simplex", "logit"}
