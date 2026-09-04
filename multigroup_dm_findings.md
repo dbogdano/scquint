@@ -41,9 +41,11 @@ also means the K-group model fixes *this* problem with a shared α — per-group
 `α_k` is not the mechanism here.
 
 That is not an argument for defaulting to `alpha_mode="shared"`, which is what
-this section originally concluded. A shared α turns out to be anti-conservative
-whenever the true overdispersion varies across cell types, and the default is now
-`per_group`. See §5a.
+this section originally concluded. A shared α is anti-conservative when the true
+overdispersion varies across cell types *and* coverage is deep enough to resolve
+that variation. At 3prime's coverage it is not, so there the choice is
+immaterial — but the default is now `per_group`, which is safe in both regimes.
+See §5a.
 
 ## 2. In this simulation it did not buy power — and the simulation was wrong
 
@@ -127,8 +129,29 @@ appear.
 So the +41% is a **power gain**, not a correction of two-group false positives,
 and the 76 events unique to the two-group model should not be presumed false.
 
-The simulated inflation is presumably a real phenomenon at extreme sparsity and
-extreme heterogeneity; it just is not the regime 3prime occupies.
+A later cross-implementation run reproduced the two-group inflation and pinned
+its trigger. Both implementations give **bit-identical p-values** on identical
+simulated arrays (50/50 exact matches across 9 configurations, max difference
+0.0), so neither had a bug. The FPR then depends almost entirely on coverage:
+
+| coverage | mild het | moderate het | strong het |
+|---|---:|---:|---:|
+| Poisson(2) | 0.000 | 0.020 | 0.020 |
+| Poisson(3) | 0.060 | 0.220 | 0.060 |
+| Poisson(20) | 1.000 | 0.980 | 0.480 |
+
+So the phenomenon is real but coverage-gated, and 3prime sits in the Poisson(2–3)
+rows where it does not appear. That is why the real-data bootstrap came out clean
+while my simulation did not — mine used ~3 reads/cell but with far more extreme
+PSI heterogeneity than real intron groups have.
+
+One caveat on reading the Poisson(20) row as calibration: an FPR of **1.000**
+is not a miscalibrated test, it is a false null. And the ordering is
+non-monotonic in heterogeneity (1.000 > 0.980 > 0.480), which is backwards for
+the proposed "heterogeneity deflates alpha, test becomes over-sensitive"
+mechanism. Both point to the simulated H0 being systematically wrong at high
+coverage rather than the test being broken — see §8 item 2 for the construction
+that separates the two.
 
 Three inflation hypotheses were checked against the real data and all failed:
 
@@ -332,8 +355,35 @@ per-group alpha at 2 reads/cell both modes sit near 0.09–0.10. Whatever residu
 inflation exists there is a property of the information available, not of the
 alpha parameterization.
 
-Whether any of this touches 3prime still depends on the real alpha spread across
-cell types, which has not been measured — see §8 item 1.
+### Resolved: 3prime is not affected
+
+The real alpha spread has now been measured, and a per-group-alpha parametric
+bootstrap run on it settles the question. Real 3prime alpha variation is large
+(median geometric CV 28.2, 76.5% of intron groups above 0.5), yet simulating from
+*that* spread and running the shared-alpha test gives:
+
+| stratum | alpha CV range | shared FPR |
+|---|---|---:|
+| Q1 | [0, 10.35) | 0.052 |
+| Q2 | [10.35, 27.10) | 0.054 |
+| Q3 | [27.10, 47.66) | 0.062 |
+| Q4 | [47.66, ∞) | 0.051 |
+| overall (8,920 replicates) | | **0.0548** |
+
+Spearman ρ between alpha spread and FPR is −0.025 (p = 0.59) — no relationship.
+And an independent sweep at realistic coverage (Poisson 2–3, 24 configurations)
+puts both modes in 0.027–0.107 with the two never differing by more than ~0.01,
+and power within ~0.02.
+
+This is consistent with the mechanism above rather than a contradiction of it:
+the inflation is **coverage-gated**. It needs enough reads per cell to resolve the
+differing alphas at all, and single-cell splicing data does not have them. The
+`shared`-alpha 3prime run therefore stands, which the direct check confirms — the
+`per_group` re-run gave 3,919 significant against 3,967 for `shared`, ρ = 0.997.
+
+`per_group` remains the default: it costs nothing at low coverage and is the only
+safe choice if this model is ever applied to deeper data (pooled, bulk-like, or
+targeted). But for 3prime the choice is immaterial.
 
 ## 6. Recommendation
 
@@ -388,32 +438,44 @@ and weighted accordingly.
 | Parametric bootstrap on real data | §2b | both calibrated; 0.0525 / 0.0507 over 14,680 replicates |
 | Weighting sensitivity | §2a | 153 vs. 151 sig, ρ = 0.9995 |
 | Low-α stratification | §7 | gained events depleted for low α (0.88x) |
-| Per-group-α DGP, `shared` vs `per_group` | §5a | `shared` inflated to 0.125–0.660; `per_group` at nominal |
+| Per-group-α DGP, `shared` vs `per_group` | §5a | at Poisson(20) `shared` inflated to 0.125–0.660; `per_group` at nominal |
+| Real per-group-α spread + bootstrap | §5a | shared FPR 0.0548 over 8,920 reps; ρ = −0.025 vs α spread |
+| `per_group` at real sparsity | §5a | 24 configs, both modes 0.027–0.107, never differing >0.01; power within 0.02 |
+| 3prime `per_group` re-run | §5a | 3,919 vs. 3,967 sig, ρ = 0.997 — α mode immaterial here |
+| Cross-implementation p-values | §2b | bit-identical, 50/50 across 9 configs, max diff 0.0 |
+| S4 (per-CT coverage-stratified Storey) | §8 | +14.2% over BH (4,529 vs. 3,967) — **not yet validated, see item 1** |
 
 ### Still needed, in priority order
 
-1. **Per-group α spread on real data.** Fit a DM per cell type per intron group
-   and look at the dispersion of α across cell types. This is the single number
-   that decides whether the 3prime run is affected by §5a; everything in §5a is
-   conditional on it. Narrow spread → 3prime stands. Wide spread → the
-   shared-α run is anti-conservative and the +41% needs re-deriving.
+1. **Validate S4 on the permuted-label p-values.** S4 reports +14.2% over BH,
+   which is the largest outstanding gain and the least verified. Storey's π0
+   estimator assumes uniform null p-values; if the null is even mildly
+   anti-conservative in a stratum, π0 is underestimated and the q-values are
+   too small. The permuted-label p-values from the §2a run are already on disk,
+   so this is nearly free: run the identical S4 pipeline on them. A calibrated
+   S4 gives π̂0 ≈ 1.0 in every stratum and ~0 significant. If it instead
+   estimates π0 < 1 and returns hits, the +14.2% is inflation.
 
-2. **Re-run 3prime with `alpha_mode="per_group"`.** One run, and it is both the
-   diagnostic and the remedy: if 2,867 holds, the shared-α result was fine
-   anyway; if it drops materially, `per_group` is the number to report. Cheaper
-   than (1) and answers the same practical question.
+   Two implementation points while doing it: clip π̂0 to ≤ 1 (the corrected
+   estimator can exceed 1 when null p-values are conservative, which several
+   low-coverage configurations are), and impose a minimum stratum size. The
+   −3.3% for Glyc and −7.9% for Mural are stratification noise from thin strata,
+   and 72 strata over 258k tests will have several of those.
 
-3. **Per-group-α parametric bootstrap.** The bootstrap in §2b simulates from a
-   shared-α DM, so it is structurally blind to §5a. Redo it drawing per-group α
-   from the spread measured in (1).
+   Also worth noting: the π0 gradient reads as biology in the write-up
+   (EN-V1 lowest, IN-CTX-CGE highest) but tracks cell-type size closely, so it
+   is at least partly power. That direction is safe — low power inflates π̂0
+   toward 1, i.e. toward BH — but it should not be interpreted as a splicing
+   result without controlling for n.
 
-4. **Cross-implementation reconciliation.** My two-group FPR (0.24–0.91) and
-   Biomni's (~0.05) disagree qualitatively, not by a tunable parameter. Run both
-   implementations on *identical* simulated `y`/`codes` arrays. Same p-values →
-   the difference is data generation, and the arithmetic-mean-vs-KL point in §2b
-   is the likely cause. Different p-values → one implementation has a bug.
+2. **Settle the Poisson(20) two-group FPR: miscalibration or false null?**
+   Generate the target group's cells *from the pooled rest mixture itself*
+   rather than from the weighted-mean PSI. That makes H0 exactly true for the
+   two-group test by construction, independent of where the KL projection of the
+   mixture sits. If FPR drops to ~0.05, the Poisson(20) row was null mismatch
+   and the "anti-conservative at high coverage" caveat should be dropped. If it
+   stays near 1.000, the caveat is real and matters for anyone applying this to
+   deeper data.
 
-5. **5prime run**, once (1)–(2) settle which `alpha_mode` to use.
-
-6. **S4 (coverage-stratified Storey) on the multi-group p-values**, which gave
-   +33% over BH on the two-group results and may compound.
+3. **5prime run.** No longer blocked — `alpha_mode` is immaterial at this
+   coverage, so use the default.

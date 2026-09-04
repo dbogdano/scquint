@@ -518,12 +518,28 @@ def _build_constrained_null_design(group_codes, K, target_local, w):
     return x_null, other
 
 
-def _empty_multigroup_result(intron_group, target_name, n_classes):
+def _empty_multigroup_result(intron_group, target_name, n_classes, n_cells_target=0,
+                             n_groups=0, skip_reason="unknown"):
+    """
+    Placeholder row for a target that was not tested in this intron group.
+
+    `n_cells_target` and `n_groups` carry the real values so the output can be
+    read after the fact: previously both were hardcoded to 0, which made every
+    skip look identical and hid why it happened. `skip_reason` names the branch,
+    so "the target had no coverage here" is distinguishable from "the target had
+    25 covered cells and min_cells_per_target is 30" - the second is a threshold
+    choice you can revisit, the first is not.
+
+    `p_value` is 1.0 but `tested` is False, and BH in
+    run_differential_splicing_multigroup only runs over `tested` rows, so these
+    never enter the multiple-testing correction.
+    """
     df_intron_group = pd.DataFrame(dict(
         intron_group=[intron_group], test_group=[target_name], p_value=[1.0],
-        ll_null=[np.nan], ll=[np.nan], n_classes=[n_classes], n_groups=[0],
-        n_cells_target=[0], alpha_target=[np.nan], alpha_rest=[np.nan],
+        ll_null=[np.nan], ll=[np.nan], n_classes=[n_classes], n_groups=[n_groups],
+        n_cells_target=[n_cells_target], alpha_target=[np.nan], alpha_rest=[np.nan],
         low_alpha=[False], opt_warning=[False], tested=[False],
+        skip_reason=[skip_reason],
     ))
     df_intron = pd.DataFrame(dict(
         test_group=[target_name] * n_classes,
@@ -620,7 +636,14 @@ def run_regression_multigroup(args):
     codes_local = local_of[codes]
 
     if K < 2 or n_cells == 0:
-        results = [_empty_multigroup_result(intron_group, name_of(t), n_classes) for t in targets]
+        reason = "no_covered_cells" if n_cells == 0 else "fewer_than_2_groups"
+        results = [
+            _empty_multigroup_result(
+                intron_group, name_of(t), n_classes,
+                n_cells_target=int(counts[t]), n_groups=K, skip_reason=reason,
+            )
+            for t in targets
+        ]
         return (
             pd.concat([r[0] for r in results], ignore_index=True),
             pd.concat([r[1] for r in results], ignore_index=True),
@@ -654,15 +677,38 @@ def run_regression_multigroup(args):
     for target in targets:
         target_name = name_of(target)
         target_local = local_of[target]
-        if target_local < 0 or n_cells_local[target_local] < min_cells_per_target:
-            g, i = _empty_multigroup_result(intron_group, target_name, n_classes)
+        n_cells_target = int(counts[target])
+
+        # `n_cells_local[target_local]` is the *bucket* total for a pooled target,
+        # so testing that would let a target with a handful of cells through on the
+        # strength of the other pooled groups, and then report the pooled bucket's
+        # psi and alpha under that target's name. Test the target's own count.
+        is_pooled = len(pooled) > 0 and target_local == n_real
+        if target_local < 0:
+            skip_reason = "no_covered_cells"
+        elif is_pooled:
+            skip_reason = "pooled_into_rest"
+        elif n_cells_target < min_cells_per_target:
+            skip_reason = "below_min_cells_per_target"
+        else:
+            skip_reason = None
+
+        if skip_reason is not None:
+            g, i = _empty_multigroup_result(
+                intron_group, target_name, n_classes,
+                n_cells_target=n_cells_target, n_groups=K, skip_reason=skip_reason,
+            )
             dfs_intron_group.append(g)
             dfs_intron.append(i)
             continue
 
         w = _group_weights(n_cells_local, reads_local, target_local, weights_mode)
         if w is None:
-            g, i = _empty_multigroup_result(intron_group, target_name, n_classes)
+            g, i = _empty_multigroup_result(
+                intron_group, target_name, n_classes,
+                n_cells_target=n_cells_target, n_groups=K,
+                skip_reason="no_reference_groups",
+            )
             dfs_intron_group.append(g)
             dfs_intron.append(i)
             continue
@@ -708,7 +754,7 @@ def run_regression_multigroup(args):
         dfs_intron_group.append(pd.DataFrame(dict(
             intron_group=[intron_group], test_group=[target_name], p_value=[p_value],
             ll_null=[ll_null], ll=[ll_alt], n_classes=[n_classes], n_groups=[K],
-            n_cells_target=[int(n_cells_local[target_local])],
+            n_cells_target=[n_cells_target],
             alpha_target=[alpha_target], alpha_rest=[alpha_rest],
             # very low concentration: each cell's usage is effectively a single
             # junction. Common and legitimate in sparse data, but the fit carries
@@ -717,7 +763,7 @@ def run_regression_multigroup(args):
             # *less* likely to reach significance, so it is not a source of
             # inflation - but individual p-values there deserve less weight.
             low_alpha=[alpha_target < LOW_ALPHA_THRESHOLD],
-            opt_warning=[opt_warning], tested=[True],
+            opt_warning=[opt_warning], tested=[True], skip_reason=[None],
         )))
         dfs_intron.append(pd.DataFrame(dict(
             test_group=[target_name] * n_classes,
